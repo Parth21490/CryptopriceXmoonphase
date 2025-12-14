@@ -1,6 +1,8 @@
 streamlit
+plotly
+requests
+pyephem
 pandas
 numpy
-plotly
-pyephem
-requests
+pytest
+hypothesis
