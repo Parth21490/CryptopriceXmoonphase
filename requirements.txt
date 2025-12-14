@@ -2,5 +2,5 @@ streamlit
 pandas
 numpy
 plotly
-ephem
+pyephem
 requests
