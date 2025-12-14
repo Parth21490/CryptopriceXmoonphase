@@ -110,7 +110,7 @@ class CryptoDataClient:
     
     BASE_URL = "https://api.bybit.com"
     FALLBACK_URL = "https://api.coingecko.com/api/v3"
-    RATE_LIMIT_DELAY = 0.5  # 500ms between requests to avoid rate limiting
+    RATE_LIMIT_DELAY = 1.0  # 1 second between requests to avoid rate limiting
     
     # Supported cryptocurrencies
     SUPPORTED_CRYPTOS = {
@@ -204,6 +204,9 @@ class CryptoDataClient:
         
         logger.info(f"Fetching {limit} days of {symbol} data from Bybit")
         
+        # Add small initial delay to be respectful to the API
+        time.sleep(0.5)
+        
         # Retry logic with exponential backoff
         max_retries = 3
         base_delay = 1.0
@@ -259,8 +262,14 @@ class CryptoDataClient:
             try:
                 return self._fetch_from_coingecko(crypto_name, limit)
             except Exception as fallback_error:
-                logger.error(f"Fallback API also failed: {fallback_error}")
-                raise Exception(f"Both primary and fallback APIs failed. Primary: {e}, Fallback: {fallback_error}")
+                logger.error(f"CoinGecko fallback also failed: {fallback_error}")
+                logger.info(f"Using demo data for {crypto_name} as final fallback...")
+                
+                try:
+                    return self._generate_demo_data(crypto_name, limit)
+                except Exception as demo_error:
+                    logger.error(f"Demo data generation failed: {demo_error}")
+                    raise Exception(f"All data sources failed. Primary: {e}, Fallback: {fallback_error}, Demo: {demo_error}")
     
     def _parse_kline_data(self, kline: List[str], symbol: str = 'BTCUSDT') -> CryptoPriceData:
         """Parse raw kline data from Bybit API response."""
@@ -345,6 +354,54 @@ class CryptoDataClient:
         except Exception as e:
             logger.error(f"CoinGecko fallback failed: {e}")
             raise
+    
+    def _generate_demo_data(self, crypto_name: str, limit: int) -> List[CryptoPriceData]:
+        """Generate demo cryptocurrency data when APIs are unavailable."""
+        import random
+        
+        logger.info(f"Generating demo data for {crypto_name} with {limit} data points")
+        
+        # Base prices for different cryptocurrencies
+        base_prices = {
+            'Bitcoin': 45000.0,
+            'Ethereum': 3000.0,
+            'Solana': 100.0
+        }
+        
+        base_price = base_prices.get(crypto_name, 1000.0)
+        symbol = self.SUPPORTED_CRYPTOS[crypto_name]
+        
+        crypto_data = []
+        current_price = base_price
+        
+        # Generate data for the last 'limit' days
+        for i in range(limit):
+            # Create date going backwards from today
+            date = datetime.now() - pd.Timedelta(days=limit - i - 1)
+            
+            # Generate realistic price movements (±5% daily change)
+            daily_change = random.uniform(-0.05, 0.05)
+            current_price *= (1 + daily_change)
+            
+            # Generate OHLC data around the current price
+            open_price = current_price * random.uniform(0.995, 1.005)
+            high_price = max(open_price, current_price) * random.uniform(1.0, 1.02)
+            low_price = min(open_price, current_price) * random.uniform(0.98, 1.0)
+            close_price = current_price
+            volume = random.uniform(500000, 2000000)
+            
+            crypto_data.append(CryptoPriceData(
+                date=date,
+                open_price=open_price,
+                high_price=high_price,
+                low_price=low_price,
+                close_price=close_price,
+                volume=volume,
+                symbol=symbol
+            ))
+        
+        logger.info(f"Generated {len(crypto_data)} demo data points for {crypto_name}")
+        return crypto_data
     
     def _validate_price_data(self, data: CryptoPriceData, crypto_name: str = 'Bitcoin') -> bool:
         """Validate that price data contains all required fields and reasonable values."""
@@ -1260,42 +1317,21 @@ class CryptoMoonDashboard:
         # Add some spacing
         st.markdown("<div style='margin: 1rem 0;'></div>", unsafe_allow_html=True)
         
-        # Refresh button - centered with better spacing
-        col1, col2, col3 = st.columns([2, 3, 2])
+        # Refresh button - properly centered
+        # Dynamic button text based on data state
+        if st.session_state.data_loaded:
+            button_text = "🔄 Refresh Data"
+            button_help = f"Fetch latest {st.session_state.selected_crypto} data and recalculate moon phases"
+        else:
+            button_text = "📊 Collect Data"
+            button_help = f"Fetch {st.session_state.selected_crypto} data and calculate moon phases for analysis"
+        
+        # Center the button using columns
+        col1, col2, col3 = st.columns([1, 2, 1])
         
         with col2:
-            # Dynamic button text based on data state
-            if st.session_state.data_loaded:
-                button_text = "🔄 Refresh Data"
-                button_help = f"Fetch latest {st.session_state.selected_crypto} data and recalculate moon phases"
-            else:
-                button_text = "📊 Collect Data"
-                button_help = f"Fetch {st.session_state.selected_crypto} data and calculate moon phases for analysis"
-            
-            # Add custom CSS for better button centering
-            st.markdown("""
-                <style>
-                .refresh-button {
-                    display: flex !important;
-                    justify-content: center !important;
-                    align-items: center !important;
-                    width: 100% !important;
-                }
-                .refresh-button > div {
-                    width: 100% !important;
-                }
-                .refresh-button button {
-                    width: 100% !important;
-                    margin: 0 auto !important;
-                }
-                </style>
-            """, unsafe_allow_html=True)
-            
-            # Create a container for better centering
-            button_container = st.container()
-            with button_container:
-                if st.button(button_text, key="refresh_button", help=button_help, use_container_width=True):
-                    self._handle_refresh()
+            if st.button(button_text, key="refresh_button", help=button_help, use_container_width=True):
+                self._handle_refresh()
         
         # Display last refresh time and selected crypto
         if st.session_state.last_refresh:
@@ -1323,6 +1359,13 @@ class CryptoMoonDashboard:
                 status_text.text(f"💰 Fetching {selected_crypto} price data...")
                 progress_bar.progress(40)
                 crypto_data = self.crypto_client.fetch_crypto_data(selected_crypto, limit=1000)
+                
+                # Check if demo data was used (demo data has very recent dates)
+                is_demo_data = False
+                if crypto_data and len(crypto_data) > 0:
+                    latest_date = max(data.date for data in crypto_data)
+                    time_diff = datetime.now() - latest_date
+                    is_demo_data = time_diff.total_seconds() < 3600  # Less than 1 hour old = demo data
                 
                 if not crypto_data:
                     progress_bar.empty()
@@ -1378,7 +1421,10 @@ class CryptoMoonDashboard:
                 status_text.empty()
                 
                 # Show success message
-                st.success(f"🎉 Successfully loaded {len(combined_data_with_changes)} days of {selected_crypto} data with {analysis_results.full_moon_count} full moon periods!")
+                if is_demo_data:
+                    st.info(f"📊 Loaded {len(combined_data_with_changes)} days of {selected_crypto} **demo data** with {analysis_results.full_moon_count} full moon periods! (Real API unavailable)")
+                else:
+                    st.success(f"🎉 Successfully loaded {len(combined_data_with_changes)} days of {selected_crypto} data with {analysis_results.full_moon_count} full moon periods!")
                 
                 # Force rerun to update the display
                 st.rerun()
@@ -1397,8 +1443,8 @@ class CryptoMoonDashboard:
                     "1. Wait 5-10 minutes and try again\n"
                     "2. Use a VPN to change your IP address\n"
                     "3. Try again later when API traffic is lower\n\n"
-                    "The app has attempted to use a backup data source, but if that also fails, "
-                    "please try again later."
+                    "**Note:** The app will automatically try backup data sources and demo data "
+                    "if the main API fails, so you can still explore the dashboard features."
                 )
             elif "timeout" in error_str.lower():
                 error_msg = (
