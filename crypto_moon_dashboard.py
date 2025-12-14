@@ -5,7 +5,7 @@ A comprehensive cryptocurrency analysis tool that correlates price movements wit
 
 Features:
 - Multi-cryptocurrency support (Bitcoin, Ethereum, Solana)
-- Real-time data from Bybit API
+- Real-time data from CoinGecko API
 - Lunar phase calculations and correlations
 - Interactive dark-themed dashboard
 - Statistical analysis and visualizations
@@ -106,35 +106,31 @@ class AnalysisResults:
 # ============================================================================
 
 class CryptoDataClient:
-    """Client for fetching cryptocurrency data from Bybit V5 Public API."""
+    """Client for fetching cryptocurrency data from CoinGecko API."""
     
-    BASE_URL = "https://api.bybit.com"
-    FALLBACK_URL = "https://api.coingecko.com/api/v3"
-    RATE_LIMIT_DELAY = 1.0  # 1 second between requests to avoid rate limiting
+    BASE_URL = "https://api.coingecko.com/api/v3"
+    RATE_LIMIT_DELAY = 1.0  # 1 second between requests to be respectful
     
-    # Supported cryptocurrencies
+    # Supported cryptocurrencies with CoinGecko IDs
     SUPPORTED_CRYPTOS = {
-        'Bitcoin': 'BTCUSDT',
-        'Ethereum': 'ETHUSDT', 
-        'Solana': 'SOLUSDT'
-    }
-    
-    # CoinGecko mapping for fallback
-    COINGECKO_IDS = {
         'Bitcoin': 'bitcoin',
         'Ethereum': 'ethereum',
         'Solana': 'solana'
     }
     
+    # Symbol mapping for display
+    CRYPTO_SYMBOLS = {
+        'Bitcoin': 'BTCUSDT',
+        'Ethereum': 'ETHUSDT', 
+        'Solana': 'SOLUSDT'
+    }
+    
     def __init__(self):
         self.session = requests.Session()
         self.session.headers.update({
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+            'User-Agent': 'CryptoMoonDashboard/1.0 (Educational Project)',
             'Accept': 'application/json',
-            'Accept-Language': 'en-US,en;q=0.9',
-            'Accept-Encoding': 'gzip, deflate, br',
-            'Connection': 'keep-alive',
-            'Upgrade-Insecure-Requests': '1'
+            'Accept-Language': 'en-US,en;q=0.9'
         })
         self.last_request_time = 0
     
@@ -146,65 +142,20 @@ class CryptoDataClient:
             time.sleep(self.RATE_LIMIT_DELAY - time_since_last)
         self.last_request_time = time.time()
     
-    def _make_request(self, endpoint: str, params: Dict[str, Any]) -> Dict[str, Any]:
-        """Make a rate-limited request to the Bybit API."""
-        self._rate_limit()
-        
-        url = f"{self.BASE_URL}{endpoint}"
-        
-        try:
-            response = self.session.get(url, params=params, timeout=30)
-            response.raise_for_status()
-            
-            data = response.json()
-            
-            # Check for API-level errors
-            if data.get('retCode') != 0:
-                error_msg = data.get('retMsg', 'Unknown API error')
-                raise requests.RequestException(f"API Error: {error_msg}")
-            
-            return data
-            
-        except requests.exceptions.Timeout:
-            logger.error("Request timeout when fetching cryptocurrency data")
-            raise
-        except requests.exceptions.ConnectionError:
-            logger.error("Connection error when fetching cryptocurrency data")
-            raise
-        except requests.exceptions.HTTPError as e:
-            if e.response.status_code == 403:
-                logger.error("API access forbidden - this may be due to rate limiting or IP restrictions")
-                raise requests.RequestException("API access forbidden. This could be due to:\n"
-                                              "1. Rate limiting - please wait a few minutes and try again\n"
-                                              "2. IP restrictions - try using a VPN\n"
-                                              "3. API changes - the service may have updated their access requirements")
-            else:
-                logger.error(f"HTTP error when fetching cryptocurrency data: {e}")
-                raise
-        except requests.exceptions.RequestException as e:
-            logger.error(f"Request error when fetching cryptocurrency data: {e}")
-            raise
+
     def fetch_crypto_data(self, crypto_name: str = 'Bitcoin', limit: int = 1000) -> List[CryptoPriceData]:
-        """Fetch cryptocurrency daily data with robust fallback system."""
+        """Fetch cryptocurrency daily data from CoinGecko API with demo fallback."""
         if limit <= 0 or limit > 1000:
             raise ValueError("Limit must be between 1 and 1000")
         
         if crypto_name not in self.SUPPORTED_CRYPTOS:
             raise ValueError(f"Unsupported cryptocurrency: {crypto_name}. Supported: {list(self.SUPPORTED_CRYPTOS.keys())}")
         
-        # Check if we should skip Bybit API (if it's known to be failing)
-        skip_bybit = getattr(self, '_skip_bybit', False)
-        
-        # Try multiple data sources in order of preference
-        data_sources = []
-        if not skip_bybit:
-            data_sources.append(("Bybit API", self._fetch_from_bybit))
-        
-        data_sources.extend([
+        # Try CoinGecko API first, then demo data as fallback
+        data_sources = [
             ("CoinGecko API", self._fetch_from_coingecko),
-            ("Alternative API", self._fetch_from_alternative_api),
             ("Demo Data", self._generate_demo_data)
-        ])
+        ]
         
         for source_name, fetch_method in data_sources:
             try:
@@ -219,93 +170,17 @@ class CryptoDataClient:
                 logger.warning(f"❌ {source_name} failed: {str(e)[:100]}...")
                 continue
         
-        # If we get here, all sources failed
+        # If we get here, all sources failed - return minimal demo data
         logger.error("🚨 All data sources failed! Generating minimal demo data...")
         return self._generate_minimal_demo_data(crypto_name, limit)
     
-    def _fetch_from_bybit(self, crypto_name: str, limit: int) -> List[CryptoPriceData]:
-        """Fetch data from Bybit API (original method)."""
-        symbol = self.SUPPORTED_CRYPTOS[crypto_name]
-        
-        endpoint = "/v5/market/kline"
-        params = {
-            'category': 'linear',
-            'symbol': symbol,
-            'interval': 'D',
-            'limit': limit
-        }
-        
-        # Single attempt for Bybit - if it fails, move to next source quickly
-        try:
-            data = self._make_request(endpoint, params)
-            
-            # Extract kline data
-            klines = data.get('result', {}).get('list', [])
-            
-            if not klines:
-                raise ValueError("No kline data received from Bybit API")
-            
-            # Parse and validate data
-            crypto_data = []
-            for kline in klines:
-                try:
-                    parsed_data = self._parse_kline_data(kline, symbol)
-                    if self._validate_price_data(parsed_data, crypto_name):
-                        crypto_data.append(parsed_data)
-                except (ValueError, IndexError) as e:
-                    logger.warning(f"Failed to parse kline data: {kline}, error: {e}")
-                    continue
-            
-            # Sort by date (oldest first)
-            crypto_data.sort(key=lambda x: x.date)
-            return crypto_data
-            
-        except Exception as e:
-            # If it's a 403 error, skip Bybit for future requests
-            if "403" in str(e) or "forbidden" in str(e).lower():
-                logger.warning("🚫 Bybit API access forbidden - will skip Bybit for future requests")
-                self._skip_bybit = True
-            
-            # Don't retry Bybit errors - move to next source immediately
-            raise Exception(f"Bybit API failed: {e}")
-    
-    def _parse_kline_data(self, kline: List[str], symbol: str = 'BTCUSDT') -> CryptoPriceData:
-        """Parse raw kline data from Bybit API response."""
-        if len(kline) < 6:
-            raise ValueError(f"Invalid kline data format: {kline}")
-        
-        try:
-            # Convert timestamp from milliseconds to datetime
-            timestamp_ms = int(kline[0])
-            date = datetime.fromtimestamp(timestamp_ms / 1000)
-            
-            # Parse price data
-            open_price = float(kline[1])
-            high_price = float(kline[2])
-            low_price = float(kline[3])
-            close_price = float(kline[4])
-            volume = float(kline[5])
-            
-            return CryptoPriceData(
-                date=date,
-                open_price=open_price,
-                high_price=high_price,
-                low_price=low_price,
-                close_price=close_price,
-                volume=volume,
-                symbol=symbol
-            )
-            
-        except (ValueError, TypeError) as e:
-            raise ValueError(f"Failed to parse numeric values from kline: {kline}") from e
-    
     def _fetch_from_coingecko(self, crypto_name: str, limit: int) -> List[CryptoPriceData]:
-        """Fallback method to fetch data from CoinGecko API."""
-        if crypto_name not in self.COINGECKO_IDS:
-            raise ValueError(f"CoinGecko fallback not available for {crypto_name}")
+        """Primary method to fetch data from CoinGecko API."""
+        if crypto_name not in self.SUPPORTED_CRYPTOS:
+            raise ValueError(f"CoinGecko not available for {crypto_name}")
         
-        coin_id = self.COINGECKO_IDS[crypto_name]
-        symbol = self.SUPPORTED_CRYPTOS[crypto_name]
+        coin_id = self.SUPPORTED_CRYPTOS[crypto_name]
+        symbol = self.CRYPTO_SYMBOLS[crypto_name]
         
         # CoinGecko free API endpoint for historical data
         endpoint = f"/coins/{coin_id}/market_chart"
@@ -315,7 +190,7 @@ class CryptoDataClient:
             'interval': 'daily'
         }
         
-        url = f"{self.FALLBACK_URL}{endpoint}"
+        url = f"{self.BASE_URL}{endpoint}"
         
         try:
             self._rate_limit()
@@ -353,65 +228,7 @@ class CryptoDataClient:
             logger.error(f"CoinGecko fallback failed: {e}")
             raise
     
-    def _fetch_from_alternative_api(self, crypto_name: str, limit: int) -> List[CryptoPriceData]:
-        """Alternative fallback method using a simple free API."""
-        # Simple mapping for alternative API
-        alt_symbols = {
-            'Bitcoin': 'bitcoin',
-            'Ethereum': 'ethereum', 
-            'Solana': 'solana'
-        }
-        
-        if crypto_name not in alt_symbols:
-            raise ValueError(f"Alternative API not available for {crypto_name}")
-        
-        symbol_id = alt_symbols[crypto_name]
-        symbol = self.SUPPORTED_CRYPTOS[crypto_name]
-        
-        # Use a simple free API (CryptoCompare alternative endpoint)
-        url = f"https://min-api.cryptocompare.com/data/v2/histoday"
-        params = {
-            'fsym': symbol.replace('USDT', '').replace('USD', ''),  # Remove USDT/USD suffix
-            'tsym': 'USD',
-            'limit': min(limit, 365),
-            'api_key': ''  # Free tier, no key needed
-        }
-        
-        try:
-            self._rate_limit()
-            response = self.session.get(url, params=params, timeout=30)
-            response.raise_for_status()
-            
-            data = response.json()
-            
-            if data.get('Response') != 'Success':
-                raise ValueError(f"Alternative API error: {data.get('Message', 'Unknown error')}")
-            
-            price_data = data.get('Data', {}).get('Data', [])
-            
-            if not price_data:
-                raise ValueError("No price data received from alternative API")
-            
-            crypto_data = []
-            for item in price_data[-limit:]:  # Get most recent data
-                date = datetime.fromtimestamp(item['time'])
-                
-                crypto_data.append(CryptoPriceData(
-                    date=date,
-                    open_price=item['open'],
-                    high_price=item['high'],
-                    low_price=item['low'],
-                    close_price=item['close'],
-                    volume=item.get('volumeto', 1000000.0),
-                    symbol=symbol
-                ))
-            
-            logger.info(f"Successfully fetched {len(crypto_data)} data points from alternative API for {crypto_name}")
-            return crypto_data
-            
-        except Exception as e:
-            logger.error(f"Alternative API fallback failed: {e}")
-            raise
+
     
     def _generate_demo_data(self, crypto_name: str, limit: int) -> List[CryptoPriceData]:
         """Generate demo cryptocurrency data when APIs are unavailable."""
@@ -1377,7 +1194,7 @@ class CryptoMoonDashboard:
         """, unsafe_allow_html=True)
         
         # Add helpful info about data sources
-        st.info("📡 **Data Sources**: Primary (Bybit API) → Backup (CoinGecko) → Alternative (CryptoCompare) → Demo Data. The dashboard will automatically use the best available source.")
+        st.info("📡 **Data Sources**: Primary (CoinGecko API) → Fallback (Demo Data). Reliable cryptocurrency data without API restrictions!")
     
     def _render_controls(self):
         """Render the control section with cryptocurrency selector and refresh button."""
@@ -1446,7 +1263,7 @@ class CryptoMoonDashboard:
             status_text = st.empty()
             
             with st.spinner(f"🚀 Fetching {selected_crypto} data and calculating moon phases..."):
-                status_text.text("📡 Connecting to Bybit API...")
+                status_text.text("📡 Connecting to CoinGecko API...")
                 progress_bar.progress(20)
                 
                 # Fetch cryptocurrency data
@@ -1524,11 +1341,9 @@ class CryptoMoonDashboard:
                 
                 # Show success message based on data source
                 if is_demo_data:
-                    st.info(f"📊 Loaded {len(combined_data_with_changes)} days of {selected_crypto} **demo data** with {analysis_results.full_moon_count} full moon periods! (APIs unavailable - using simulated data)")
-                elif is_fallback_data:
-                    st.warning(f"⚠️ Loaded {len(combined_data_with_changes)} days of {selected_crypto} data from **backup source** with {analysis_results.full_moon_count} full moon periods! (Primary API unavailable)")
+                    st.info(f"📊 Loaded {len(combined_data_with_changes)} days of {selected_crypto} **demo data** with {analysis_results.full_moon_count} full moon periods! (CoinGecko API unavailable - using simulated data)")
                 else:
-                    st.success(f"🎉 Successfully loaded {len(combined_data_with_changes)} days of {selected_crypto} data with {analysis_results.full_moon_count} full moon periods!")
+                    st.success(f"🎉 Successfully loaded {len(combined_data_with_changes)} days of {selected_crypto} data from **CoinGecko API** with {analysis_results.full_moon_count} full moon periods!")
                 
                 # Force rerun to update the display
                 st.rerun()
