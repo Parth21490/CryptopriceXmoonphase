@@ -185,13 +185,46 @@ class CryptoDataClient:
             logger.error(f"Request error when fetching cryptocurrency data: {e}")
             raise
     def fetch_crypto_data(self, crypto_name: str = 'Bitcoin', limit: int = 1000) -> List[CryptoPriceData]:
-        """Fetch cryptocurrency daily data from Bybit V5 Public API."""
+        """Fetch cryptocurrency daily data with robust fallback system."""
         if limit <= 0 or limit > 1000:
             raise ValueError("Limit must be between 1 and 1000")
         
         if crypto_name not in self.SUPPORTED_CRYPTOS:
             raise ValueError(f"Unsupported cryptocurrency: {crypto_name}. Supported: {list(self.SUPPORTED_CRYPTOS.keys())}")
         
+        # Check if we should skip Bybit API (if it's known to be failing)
+        skip_bybit = getattr(self, '_skip_bybit', False)
+        
+        # Try multiple data sources in order of preference
+        data_sources = []
+        if not skip_bybit:
+            data_sources.append(("Bybit API", self._fetch_from_bybit))
+        
+        data_sources.extend([
+            ("CoinGecko API", self._fetch_from_coingecko),
+            ("Alternative API", self._fetch_from_alternative_api),
+            ("Demo Data", self._generate_demo_data)
+        ])
+        
+        for source_name, fetch_method in data_sources:
+            try:
+                logger.info(f"Trying {source_name} for {crypto_name}...")
+                data = fetch_method(crypto_name, limit)
+                if data and len(data) > 0:
+                    logger.info(f"✅ Successfully fetched {len(data)} data points from {source_name}")
+                    return data
+                else:
+                    logger.warning(f"❌ {source_name} returned no data")
+            except Exception as e:
+                logger.warning(f"❌ {source_name} failed: {str(e)[:100]}...")
+                continue
+        
+        # If we get here, all sources failed
+        logger.error("🚨 All data sources failed! Generating minimal demo data...")
+        return self._generate_minimal_demo_data(crypto_name, limit)
+    
+    def _fetch_from_bybit(self, crypto_name: str, limit: int) -> List[CryptoPriceData]:
+        """Fetch data from Bybit API (original method)."""
         symbol = self.SUPPORTED_CRYPTOS[crypto_name]
         
         endpoint = "/v5/market/kline"
@@ -202,39 +235,15 @@ class CryptoDataClient:
             'limit': limit
         }
         
-        logger.info(f"Fetching {limit} days of {symbol} data from Bybit")
-        
-        # Add small initial delay to be respectful to the API
-        time.sleep(0.5)
-        
-        # Try to fetch data with limited retries
-        max_retries = 2  # Reduced retries for faster fallback
-        base_delay = 1.0
-        
-        for attempt in range(max_retries):
-            try:
-                data = self._make_request(endpoint, params)
-                break  # Success, exit retry loop
-            except requests.exceptions.RequestException as e:
-                # For 403 errors, don't retry - immediately fall back
-                if "403" in str(e) or "forbidden" in str(e).lower():
-                    logger.warning(f"API access forbidden - skipping retries and using fallback data sources")
-                    raise e  # Immediately trigger fallback
-                
-                if attempt == max_retries - 1:  # Last attempt
-                    raise e
-                
-                # Only retry for non-403 errors
-                delay = base_delay * (2 ** attempt)
-                logger.warning(f"Request failed (attempt {attempt + 1}/{max_retries}). Retrying in {delay} seconds...")
-                time.sleep(delay)
-        
-        # Extract kline data
+        # Single attempt for Bybit - if it fails, move to next source quickly
+        try:
+            data = self._make_request(endpoint, params)
+            
+            # Extract kline data
             klines = data.get('result', {}).get('list', [])
             
             if not klines:
-                logger.warning(f"No kline data received from API for {symbol}")
-                return []
+                raise ValueError("No kline data received from Bybit API")
             
             # Parse and validate data
             crypto_data = []
@@ -243,39 +252,22 @@ class CryptoDataClient:
                     parsed_data = self._parse_kline_data(kline, symbol)
                     if self._validate_price_data(parsed_data, crypto_name):
                         crypto_data.append(parsed_data)
-                    else:
-                        logger.warning(f"Invalid data point skipped: {kline}")
                 except (ValueError, IndexError) as e:
                     logger.warning(f"Failed to parse kline data: {kline}, error: {e}")
                     continue
             
             # Sort by date (oldest first)
             crypto_data.sort(key=lambda x: x.date)
-            
-            logger.info(f"Successfully fetched and parsed {len(crypto_data)} data points for {symbol}")
             return crypto_data
             
         except Exception as e:
-            logger.error(f"Failed to fetch {crypto_name} data from Bybit: {e}")
-            logger.info(f"Attempting to fetch {crypto_name} data from CoinGecko as fallback...")
+            # If it's a 403 error, skip Bybit for future requests
+            if "403" in str(e) or "forbidden" in str(e).lower():
+                logger.warning("🚫 Bybit API access forbidden - will skip Bybit for future requests")
+                self._skip_bybit = True
             
-            try:
-                return self._fetch_from_coingecko(crypto_name, limit)
-            except Exception as fallback_error:
-                logger.error(f"CoinGecko fallback also failed: {fallback_error}")
-                logger.info(f"Trying alternative free API for {crypto_name}...")
-                
-                try:
-                    return self._fetch_from_alternative_api(crypto_name, limit)
-                except Exception as alt_error:
-                    logger.error(f"Alternative API also failed: {alt_error}")
-                    logger.info(f"Using demo data for {crypto_name} as final fallback...")
-                    
-                    try:
-                        return self._generate_demo_data(crypto_name, limit)
-                    except Exception as demo_error:
-                        logger.error(f"Demo data generation failed: {demo_error}")
-                        raise Exception(f"All data sources failed. Primary: {e}, CoinGecko: {fallback_error}, Alternative: {alt_error}, Demo: {demo_error}")
+            # Don't retry Bybit errors - move to next source immediately
+            raise Exception(f"Bybit API failed: {e}")
     
     def _parse_kline_data(self, kline: List[str], symbol: str = 'BTCUSDT') -> CryptoPriceData:
         """Parse raw kline data from Bybit API response."""
@@ -423,50 +415,83 @@ class CryptoDataClient:
     
     def _generate_demo_data(self, crypto_name: str, limit: int) -> List[CryptoPriceData]:
         """Generate demo cryptocurrency data when APIs are unavailable."""
-        import random
+        try:
+            import random
+            
+            logger.info(f"Generating demo data for {crypto_name} with {limit} data points")
+            
+            # Base prices for different cryptocurrencies
+            base_prices = {
+                'Bitcoin': 45000.0,
+                'Ethereum': 3000.0,
+                'Solana': 100.0
+            }
+            
+            base_price = base_prices.get(crypto_name, 1000.0)
+            symbol = self.SUPPORTED_CRYPTOS[crypto_name]
+            
+            crypto_data = []
+            current_price = base_price
+            
+            # Generate data for the last 'limit' days
+            for i in range(limit):
+                # Create date going backwards from today
+                date = datetime.now() - pd.Timedelta(days=limit - i - 1)
+                
+                # Generate realistic price movements (±5% daily change)
+                daily_change = random.uniform(-0.05, 0.05)
+                current_price *= (1 + daily_change)
+                
+                # Generate OHLC data around the current price
+                open_price = current_price * random.uniform(0.995, 1.005)
+                high_price = max(open_price, current_price) * random.uniform(1.0, 1.02)
+                low_price = min(open_price, current_price) * random.uniform(0.98, 1.0)
+                close_price = current_price
+                volume = random.uniform(500000, 2000000)
+                
+                crypto_data.append(CryptoPriceData(
+                    date=date,
+                    open_price=open_price,
+                    high_price=high_price,
+                    low_price=low_price,
+                    close_price=close_price,
+                    volume=volume,
+                    symbol=symbol
+                ))
+            
+            logger.info(f"Generated {len(crypto_data)} demo data points for {crypto_name}")
+            return crypto_data
         
-        logger.info(f"Generating demo data for {crypto_name} with {limit} data points")
+        except Exception as e:
+            logger.error(f"Demo data generation failed: {e}")
+            # Return minimal fallback data
+            return self._generate_minimal_demo_data(crypto_name, limit)
+    
+    def _generate_minimal_demo_data(self, crypto_name: str, limit: int) -> List[CryptoPriceData]:
+        """Generate minimal demo data as absolute last resort."""
+        logger.info(f"🚨 Generating minimal demo data for {crypto_name} (last resort)")
         
-        # Base prices for different cryptocurrencies
-        base_prices = {
-            'Bitcoin': 45000.0,
-            'Ethereum': 3000.0,
-            'Solana': 100.0
-        }
-        
+        # Simple base prices
+        base_prices = {'Bitcoin': 45000.0, 'Ethereum': 3000.0, 'Solana': 100.0}
         base_price = base_prices.get(crypto_name, 1000.0)
         symbol = self.SUPPORTED_CRYPTOS[crypto_name]
         
         crypto_data = []
-        current_price = base_price
-        
-        # Generate data for the last 'limit' days
-        for i in range(limit):
-            # Create date going backwards from today
-            date = datetime.now() - pd.Timedelta(days=limit - i - 1)
-            
-            # Generate realistic price movements (±5% daily change)
-            daily_change = random.uniform(-0.05, 0.05)
-            current_price *= (1 + daily_change)
-            
-            # Generate OHLC data around the current price
-            open_price = current_price * random.uniform(0.995, 1.005)
-            high_price = max(open_price, current_price) * random.uniform(1.0, 1.02)
-            low_price = min(open_price, current_price) * random.uniform(0.98, 1.0)
-            close_price = current_price
-            volume = random.uniform(500000, 2000000)
+        for i in range(min(limit, 30)):  # Limit to 30 days for minimal data
+            date = datetime.now() - pd.Timedelta(days=30 - i - 1)
+            price = base_price * (1 + (i % 10 - 5) * 0.01)  # Simple price variation
             
             crypto_data.append(CryptoPriceData(
                 date=date,
-                open_price=open_price,
-                high_price=high_price,
-                low_price=low_price,
-                close_price=close_price,
-                volume=volume,
+                open_price=price * 0.999,
+                high_price=price * 1.001,
+                low_price=price * 0.998,
+                close_price=price,
+                volume=1000000.0,
                 symbol=symbol
             ))
         
-        logger.info(f"Generated {len(crypto_data)} demo data points for {crypto_name}")
+        logger.info(f"Generated {len(crypto_data)} minimal demo data points")
         return crypto_data
     
     def _validate_price_data(self, data: CryptoPriceData, crypto_name: str = 'Bitcoin') -> bool:
