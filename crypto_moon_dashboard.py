@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-ğŸŒ™ Crypto Moon Dashboard
+ğŸ™ Crypto Moon Dashboard
 A comprehensive cryptocurrency analysis tool that correlates price movements with lunar phases.
 
 Features:
@@ -27,13 +27,13 @@ import logging
 try:
     import plotly.graph_objects as go
 except ImportError:
-    st.error("âŒ Plotly is not installed. Please install it with: pip install plotly>=5.15.0")
+    st.error("â Plotly is not installed. Please install it with: pip install plotly>=5.15.0")
     st.stop()
 
 try:
     import ephem
 except ImportError:
-    st.error("âŒ PyEphem is not installed. Please install it with: pip install pyephem>=4.1.4")
+    st.error("â PyEphem is not installed. Please install it with: pip install pyephem>=4.1.4")
     st.stop()
 
 # Configure logging
@@ -948,8 +948,8 @@ class CryptoMoonDashboard:
         """Run the complete dashboard application."""
         # Configure page
         st.set_page_config(
-            page_title="ğŸŒ™ Crypto Moon Dashboard",
-            page_icon="ğŸŒ™",
+            page_title="ğŸ™ Crypto Moon Dashboard",
+            page_icon="ğŸ™",
             layout="wide",
             initial_sidebar_state="collapsed"
         )
@@ -1280,7 +1280,7 @@ class CryptoMoonDashboard:
         """Render the dashboard header."""
         st.markdown("""
         <div class="main-header">
-            <h1>ğŸŒ™ Crypto Moon Dashboard</h1>
+            <h1>ğŸ™ Crypto Moon Dashboard</h1>
             <p>Analyzing correlations between cryptocurrency price movements and lunar phases</p>
         </div>
         """, unsafe_allow_html=True)
@@ -1374,7 +1374,7 @@ class CryptoMoonDashboard:
                     return
                 
                 # Calculate moon phases
-                status_text.text("ğŸŒ™ Calculating lunar phases...")
+                status_text.text("ğŸ™ Calculating lunar phases...")
                 progress_bar.progress(60)
                 dates = [data.date for data in crypto_data]
                 moon_data = self.moon_calculator.calculate_moon_phases_for_dates(dates)
@@ -1456,14 +1456,14 @@ class CryptoMoonDashboard:
                 )
             elif "connection" in error_str.lower():
                 error_msg = (
-                    "ğŸŒ **Connection Error**\n\n"
+                    "ğŸ **Connection Error**\n\n"
                     "Unable to connect to the cryptocurrency data API. Please:\n"
                     "- Check your internet connection\n"
                     "- Try again in a few moments\n"
                     "- Ensure you're not behind a restrictive firewall"
                 )
             else:
-                error_msg = f"âŒ **Data Fetch Error**\n\nFailed to refresh data: {str(e)}\n\nPlease try again in a few moments."
+                error_msg = f"â **Data Fetch Error**\n\nFailed to refresh data: {str(e)}\n\nPlease try again in a few moments."
             
             st.session_state.error_message = error_msg
             logger.error(f"Data refresh failed: {e}")
@@ -1635,7 +1635,7 @@ class CryptoMoonDashboard:
             st.info("No full moon data with price changes available.")
             return
         
-        st.markdown("## ğŸŒ• Full Moon Analysis Table")
+        st.markdown("## ğŸ• Full Moon Analysis Table")
         
         # Create table data with enhanced formatting
         table_data = []
@@ -1654,7 +1654,7 @@ class CryptoMoonDashboard:
             
             table_data.append({
                 "ğŸ—“ï¸ Date": date_str,
-                "ğŸŒ• Moon Phase": f"{point.moon_data.phase_percentage:.1f}%",
+                "ğŸ• Moon Phase": f"{point.moon_data.phase_percentage:.1f}%",
                 f"ğŸ’° {st.session_state.selected_crypto} Price": f"${point.crypto_data.close_price:,.2f}",
                 "ğŸ“Š Price Change": change_str,
                 "ğŸ“ˆ Volume": f"{point.crypto_data.volume:,.0f}"
@@ -1696,7 +1696,7 @@ class CryptoMoonDashboard:
             # Calculate win rate
             win_rate = (positive_days / len(full_moon_data)) * 100
             
-            st.markdown("### ğŸŒ• Full Moon Performance Summary")
+            st.markdown("### ğŸ• Full Moon Performance Summary")
             
             col1, col2, col3, col4 = st.columns(4)
             with col1:
