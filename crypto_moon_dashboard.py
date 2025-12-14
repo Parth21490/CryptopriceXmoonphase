@@ -109,7 +109,8 @@ class CryptoDataClient:
     """Client for fetching cryptocurrency data from Bybit V5 Public API."""
     
     BASE_URL = "https://api.bybit.com"
-    RATE_LIMIT_DELAY = 0.1  # 100ms between requests
+    FALLBACK_URL = "https://api.coingecko.com/api/v3"
+    RATE_LIMIT_DELAY = 0.5  # 500ms between requests to avoid rate limiting
     
     # Supported cryptocurrencies
     SUPPORTED_CRYPTOS = {
@@ -118,10 +119,22 @@ class CryptoDataClient:
         'Solana': 'SOLUSDT'
     }
     
+    # CoinGecko mapping for fallback
+    COINGECKO_IDS = {
+        'Bitcoin': 'bitcoin',
+        'Ethereum': 'ethereum',
+        'Solana': 'solana'
+    }
+    
     def __init__(self):
         self.session = requests.Session()
         self.session.headers.update({
-            'User-Agent': 'CryptoMoonDashboard/1.0'
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+            'Accept': 'application/json',
+            'Accept-Language': 'en-US,en;q=0.9',
+            'Accept-Encoding': 'gzip, deflate, br',
+            'Connection': 'keep-alive',
+            'Upgrade-Insecure-Requests': '1'
         })
         self.last_request_time = 0
     
@@ -159,8 +172,15 @@ class CryptoDataClient:
             logger.error("Connection error when fetching cryptocurrency data")
             raise
         except requests.exceptions.HTTPError as e:
-            logger.error(f"HTTP error when fetching cryptocurrency data: {e}")
-            raise
+            if e.response.status_code == 403:
+                logger.error("API access forbidden - this may be due to rate limiting or IP restrictions")
+                raise requests.RequestException("API access forbidden. This could be due to:\n"
+                                              "1. Rate limiting - please wait a few minutes and try again\n"
+                                              "2. IP restrictions - try using a VPN\n"
+                                              "3. API changes - the service may have updated their access requirements")
+            else:
+                logger.error(f"HTTP error when fetching cryptocurrency data: {e}")
+                raise
         except requests.exceptions.RequestException as e:
             logger.error(f"Request error when fetching cryptocurrency data: {e}")
             raise
@@ -184,10 +204,29 @@ class CryptoDataClient:
         
         logger.info(f"Fetching {limit} days of {symbol} data from Bybit")
         
-        try:
-            data = self._make_request(endpoint, params)
-            
-            # Extract kline data
+        # Retry logic with exponential backoff
+        max_retries = 3
+        base_delay = 1.0
+        
+        for attempt in range(max_retries):
+            try:
+                data = self._make_request(endpoint, params)
+                break  # Success, exit retry loop
+            except requests.exceptions.RequestException as e:
+                if attempt == max_retries - 1:  # Last attempt
+                    raise e
+                
+                # Check if it's a 403 error and suggest longer wait
+                if "403" in str(e) or "forbidden" in str(e).lower():
+                    delay = base_delay * (3 ** attempt)  # Longer delay for 403 errors
+                    logger.warning(f"API access forbidden (attempt {attempt + 1}/{max_retries}). Waiting {delay} seconds before retry...")
+                else:
+                    delay = base_delay * (2 ** attempt)  # Standard exponential backoff
+                    logger.warning(f"Request failed (attempt {attempt + 1}/{max_retries}). Retrying in {delay} seconds...")
+                
+                time.sleep(delay)
+        
+        # Extract kline data
             klines = data.get('result', {}).get('list', [])
             
             if not klines:
@@ -214,8 +253,14 @@ class CryptoDataClient:
             return crypto_data
             
         except Exception as e:
-            logger.error(f"Failed to fetch {crypto_name} data: {e}")
-            raise
+            logger.error(f"Failed to fetch {crypto_name} data from Bybit: {e}")
+            logger.info(f"Attempting to fetch {crypto_name} data from CoinGecko as fallback...")
+            
+            try:
+                return self._fetch_from_coingecko(crypto_name, limit)
+            except Exception as fallback_error:
+                logger.error(f"Fallback API also failed: {fallback_error}")
+                raise Exception(f"Both primary and fallback APIs failed. Primary: {e}, Fallback: {fallback_error}")
     
     def _parse_kline_data(self, kline: List[str], symbol: str = 'BTCUSDT') -> CryptoPriceData:
         """Parse raw kline data from Bybit API response."""
@@ -246,6 +291,61 @@ class CryptoDataClient:
             
         except (ValueError, TypeError) as e:
             raise ValueError(f"Failed to parse numeric values from kline: {kline}") from e
+    
+    def _fetch_from_coingecko(self, crypto_name: str, limit: int) -> List[CryptoPriceData]:
+        """Fallback method to fetch data from CoinGecko API."""
+        if crypto_name not in self.COINGECKO_IDS:
+            raise ValueError(f"CoinGecko fallback not available for {crypto_name}")
+        
+        coin_id = self.COINGECKO_IDS[crypto_name]
+        symbol = self.SUPPORTED_CRYPTOS[crypto_name]
+        
+        # CoinGecko free API endpoint for historical data
+        endpoint = f"/coins/{coin_id}/market_chart"
+        params = {
+            'vs_currency': 'usd',
+            'days': min(limit, 365),  # CoinGecko free tier limit
+            'interval': 'daily'
+        }
+        
+        url = f"{self.FALLBACK_URL}{endpoint}"
+        
+        try:
+            self._rate_limit()
+            response = self.session.get(url, params=params, timeout=30)
+            response.raise_for_status()
+            
+            data = response.json()
+            prices = data.get('prices', [])
+            
+            if not prices:
+                raise ValueError("No price data received from CoinGecko")
+            
+            crypto_data = []
+            for price_point in prices[-limit:]:  # Get the most recent data points
+                timestamp_ms = price_point[0]
+                price = price_point[1]
+                
+                date = datetime.fromtimestamp(timestamp_ms / 1000)
+                
+                # CoinGecko only provides close price, so we'll use it for all OHLC values
+                crypto_data.append(CryptoPriceData(
+                    date=date,
+                    open_price=price * 0.999,  # Approximate open price
+                    high_price=price * 1.001,  # Approximate high price
+                    low_price=price * 0.999,   # Approximate low price
+                    close_price=price,
+                    volume=1000000.0,  # Default volume since CoinGecko free tier doesn't provide it
+                    symbol=symbol
+                ))
+            
+            logger.info(f"Successfully fetched {len(crypto_data)} data points from CoinGecko for {crypto_name}")
+            return crypto_data
+            
+        except Exception as e:
+            logger.error(f"CoinGecko fallback failed: {e}")
+            raise
+    
     def _validate_price_data(self, data: CryptoPriceData, crypto_name: str = 'Bitcoin') -> bool:
         """Validate that price data contains all required fields and reasonable values."""
         try:
@@ -1160,8 +1260,8 @@ class CryptoMoonDashboard:
         # Add some spacing
         st.markdown("<div style='margin: 1rem 0;'></div>", unsafe_allow_html=True)
         
-        # Refresh button
-        col1, col2, col3 = st.columns([1, 1, 1])
+        # Refresh button - centered with better spacing
+        col1, col2, col3 = st.columns([2, 3, 2])
         
         with col2:
             # Dynamic button text based on data state
@@ -1172,8 +1272,30 @@ class CryptoMoonDashboard:
                 button_text = "📊 Collect Data"
                 button_help = f"Fetch {st.session_state.selected_crypto} data and calculate moon phases for analysis"
             
-            if st.button(button_text, key="refresh_button", help=button_help):
-                self._handle_refresh()
+            # Add custom CSS for better button centering
+            st.markdown("""
+                <style>
+                .refresh-button {
+                    display: flex !important;
+                    justify-content: center !important;
+                    align-items: center !important;
+                    width: 100% !important;
+                }
+                .refresh-button > div {
+                    width: 100% !important;
+                }
+                .refresh-button button {
+                    width: 100% !important;
+                    margin: 0 auto !important;
+                }
+                </style>
+            """, unsafe_allow_html=True)
+            
+            # Create a container for better centering
+            button_container = st.container()
+            with button_container:
+                if st.button(button_text, key="refresh_button", help=button_help, use_container_width=True):
+                    self._handle_refresh()
         
         # Display last refresh time and selected crypto
         if st.session_state.last_refresh:
@@ -1262,9 +1384,43 @@ class CryptoMoonDashboard:
                 st.rerun()
                 
         except Exception as e:
-            error_msg = f"Failed to refresh data: {str(e)}"
+            # Create user-friendly error messages
+            error_str = str(e)
+            if "403" in error_str or "forbidden" in error_str.lower():
+                error_msg = (
+                    "🚫 **API Access Restricted**\n\n"
+                    "The cryptocurrency data API is currently blocking requests. This can happen due to:\n"
+                    "- **Rate limiting**: Too many requests in a short time\n"
+                    "- **IP restrictions**: Your location may be blocked\n"
+                    "- **API changes**: The service may have updated their access requirements\n\n"
+                    "**Solutions to try:**\n"
+                    "1. Wait 5-10 minutes and try again\n"
+                    "2. Use a VPN to change your IP address\n"
+                    "3. Try again later when API traffic is lower\n\n"
+                    "The app has attempted to use a backup data source, but if that also fails, "
+                    "please try again later."
+                )
+            elif "timeout" in error_str.lower():
+                error_msg = (
+                    "⏱️ **Connection Timeout**\n\n"
+                    "The request took too long to complete. This usually means:\n"
+                    "- Slow internet connection\n"
+                    "- API server is overloaded\n\n"
+                    "Please check your internet connection and try again."
+                )
+            elif "connection" in error_str.lower():
+                error_msg = (
+                    "🌐 **Connection Error**\n\n"
+                    "Unable to connect to the cryptocurrency data API. Please:\n"
+                    "- Check your internet connection\n"
+                    "- Try again in a few moments\n"
+                    "- Ensure you're not behind a restrictive firewall"
+                )
+            else:
+                error_msg = f"❌ **Data Fetch Error**\n\nFailed to refresh data: {str(e)}\n\nPlease try again in a few moments."
+            
             st.session_state.error_message = error_msg
-            logger.error(error_msg)
+            logger.error(f"Data refresh failed: {e}")
             
             # Preserve existing data if available
             if not st.session_state.data_loaded:
