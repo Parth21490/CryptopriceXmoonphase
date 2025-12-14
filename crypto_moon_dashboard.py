@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-ğŸ™ Crypto Moon Dashboard
+ï¿½ Crypto Moon Dashboard
 A comprehensive cryptocurrency analysis tool that correlates price movements with lunar phases.
 
 Features:
@@ -27,13 +27,13 @@ import logging
 try:
     import plotly.graph_objects as go
 except ImportError:
-    st.error("â Plotly is not installed. Please install it with: pip install plotly>=5.15.0")
+    st.error("ï¿½ Plotly is not installed. Please install it with: pip install plotly>=5.15.0")
     st.stop()
 
 try:
     import ephem
 except ImportError:
-    st.error("â PyEphem is not installed. Please install it with: pip install pyephem>=4.1.4")
+    st.error("ï¿½ PyEphem is not installed. Please install it with: pip install pyephem>=4.1.4")
     st.stop()
 
 # Configure logging
@@ -207,8 +207,8 @@ class CryptoDataClient:
         # Add small initial delay to be respectful to the API
         time.sleep(0.5)
         
-        # Retry logic with exponential backoff
-        max_retries = 3
+        # Try to fetch data with limited retries
+        max_retries = 2  # Reduced retries for faster fallback
         base_delay = 1.0
         
         for attempt in range(max_retries):
@@ -216,17 +216,17 @@ class CryptoDataClient:
                 data = self._make_request(endpoint, params)
                 break  # Success, exit retry loop
             except requests.exceptions.RequestException as e:
+                # For 403 errors, don't retry - immediately fall back
+                if "403" in str(e) or "forbidden" in str(e).lower():
+                    logger.warning(f"API access forbidden - skipping retries and using fallback data sources")
+                    raise e  # Immediately trigger fallback
+                
                 if attempt == max_retries - 1:  # Last attempt
                     raise e
                 
-                # Check if it's a 403 error and suggest longer wait
-                if "403" in str(e) or "forbidden" in str(e).lower():
-                    delay = base_delay * (3 ** attempt)  # Longer delay for 403 errors
-                    logger.warning(f"API access forbidden (attempt {attempt + 1}/{max_retries}). Waiting {delay} seconds before retry...")
-                else:
-                    delay = base_delay * (2 ** attempt)  # Standard exponential backoff
-                    logger.warning(f"Request failed (attempt {attempt + 1}/{max_retries}). Retrying in {delay} seconds...")
-                
+                # Only retry for non-403 errors
+                delay = base_delay * (2 ** attempt)
+                logger.warning(f"Request failed (attempt {attempt + 1}/{max_retries}). Retrying in {delay} seconds...")
                 time.sleep(delay)
         
         # Extract kline data
@@ -263,13 +263,19 @@ class CryptoDataClient:
                 return self._fetch_from_coingecko(crypto_name, limit)
             except Exception as fallback_error:
                 logger.error(f"CoinGecko fallback also failed: {fallback_error}")
-                logger.info(f"Using demo data for {crypto_name} as final fallback...")
+                logger.info(f"Trying alternative free API for {crypto_name}...")
                 
                 try:
-                    return self._generate_demo_data(crypto_name, limit)
-                except Exception as demo_error:
-                    logger.error(f"Demo data generation failed: {demo_error}")
-                    raise Exception(f"All data sources failed. Primary: {e}, Fallback: {fallback_error}, Demo: {demo_error}")
+                    return self._fetch_from_alternative_api(crypto_name, limit)
+                except Exception as alt_error:
+                    logger.error(f"Alternative API also failed: {alt_error}")
+                    logger.info(f"Using demo data for {crypto_name} as final fallback...")
+                    
+                    try:
+                        return self._generate_demo_data(crypto_name, limit)
+                    except Exception as demo_error:
+                        logger.error(f"Demo data generation failed: {demo_error}")
+                        raise Exception(f"All data sources failed. Primary: {e}, CoinGecko: {fallback_error}, Alternative: {alt_error}, Demo: {demo_error}")
     
     def _parse_kline_data(self, kline: List[str], symbol: str = 'BTCUSDT') -> CryptoPriceData:
         """Parse raw kline data from Bybit API response."""
@@ -353,6 +359,66 @@ class CryptoDataClient:
             
         except Exception as e:
             logger.error(f"CoinGecko fallback failed: {e}")
+            raise
+    
+    def _fetch_from_alternative_api(self, crypto_name: str, limit: int) -> List[CryptoPriceData]:
+        """Alternative fallback method using a simple free API."""
+        # Simple mapping for alternative API
+        alt_symbols = {
+            'Bitcoin': 'bitcoin',
+            'Ethereum': 'ethereum', 
+            'Solana': 'solana'
+        }
+        
+        if crypto_name not in alt_symbols:
+            raise ValueError(f"Alternative API not available for {crypto_name}")
+        
+        symbol_id = alt_symbols[crypto_name]
+        symbol = self.SUPPORTED_CRYPTOS[crypto_name]
+        
+        # Use a simple free API (CryptoCompare alternative endpoint)
+        url = f"https://min-api.cryptocompare.com/data/v2/histoday"
+        params = {
+            'fsym': symbol.replace('USDT', '').replace('USD', ''),  # Remove USDT/USD suffix
+            'tsym': 'USD',
+            'limit': min(limit, 365),
+            'api_key': ''  # Free tier, no key needed
+        }
+        
+        try:
+            self._rate_limit()
+            response = self.session.get(url, params=params, timeout=30)
+            response.raise_for_status()
+            
+            data = response.json()
+            
+            if data.get('Response') != 'Success':
+                raise ValueError(f"Alternative API error: {data.get('Message', 'Unknown error')}")
+            
+            price_data = data.get('Data', {}).get('Data', [])
+            
+            if not price_data:
+                raise ValueError("No price data received from alternative API")
+            
+            crypto_data = []
+            for item in price_data[-limit:]:  # Get most recent data
+                date = datetime.fromtimestamp(item['time'])
+                
+                crypto_data.append(CryptoPriceData(
+                    date=date,
+                    open_price=item['open'],
+                    high_price=item['high'],
+                    low_price=item['low'],
+                    close_price=item['close'],
+                    volume=item.get('volumeto', 1000000.0),
+                    symbol=symbol
+                ))
+            
+            logger.info(f"Successfully fetched {len(crypto_data)} data points from alternative API for {crypto_name}")
+            return crypto_data
+            
+        except Exception as e:
+            logger.error(f"Alternative API fallback failed: {e}")
             raise
     
     def _generate_demo_data(self, crypto_name: str, limit: int) -> List[CryptoPriceData]:
@@ -948,8 +1014,8 @@ class CryptoMoonDashboard:
         """Run the complete dashboard application."""
         # Configure page
         st.set_page_config(
-            page_title="ğŸ™ Crypto Moon Dashboard",
-            page_icon="ğŸ™",
+            page_title="ğŸŒ™ Crypto Moon Dashboard",
+            page_icon="ğŸŒ™",
             layout="wide",
             initial_sidebar_state="collapsed"
         )
@@ -1280,10 +1346,13 @@ class CryptoMoonDashboard:
         """Render the dashboard header."""
         st.markdown("""
         <div class="main-header">
-            <h1>ğŸ™ Crypto Moon Dashboard</h1>
+            <h1>ğŸŒ™ Crypto Moon Dashboard</h1>
             <p>Analyzing correlations between cryptocurrency price movements and lunar phases</p>
         </div>
         """, unsafe_allow_html=True)
+        
+        # Add helpful info about data sources
+        st.info("ğŸ“¡ **Data Sources**: Primary (Bybit API) â†’ Backup (CoinGecko) â†’ Alternative (CryptoCompare) â†’ Demo Data. The dashboard will automatically use the best available source.")
     
     def _render_controls(self):
         """Render the control section with cryptocurrency selector and refresh button."""
@@ -1360,12 +1429,20 @@ class CryptoMoonDashboard:
                 progress_bar.progress(40)
                 crypto_data = self.crypto_client.fetch_crypto_data(selected_crypto, limit=1000)
                 
-                # Check if demo data was used (demo data has very recent dates)
+                # Check data source type for user notification
                 is_demo_data = False
+                is_fallback_data = False
                 if crypto_data and len(crypto_data) > 0:
                     latest_date = max(data.date for data in crypto_data)
                     time_diff = datetime.now() - latest_date
                     is_demo_data = time_diff.total_seconds() < 3600  # Less than 1 hour old = demo data
+                    
+                    # Check if we're using fallback data (CoinGecko or alternative API)
+                    # This can be detected by checking if the data has certain characteristics
+                    if not is_demo_data and len(crypto_data) > 0:
+                        # Check if volume is the default value (indicates CoinGecko fallback)
+                        first_volume = crypto_data[0].volume
+                        is_fallback_data = first_volume == 1000000.0
                 
                 if not crypto_data:
                     progress_bar.empty()
@@ -1374,7 +1451,7 @@ class CryptoMoonDashboard:
                     return
                 
                 # Calculate moon phases
-                status_text.text("ğŸ™ Calculating lunar phases...")
+                status_text.text("ï¿½ Calculating lunar phases...")
                 progress_bar.progress(60)
                 dates = [data.date for data in crypto_data]
                 moon_data = self.moon_calculator.calculate_moon_phases_for_dates(dates)
@@ -1420,9 +1497,11 @@ class CryptoMoonDashboard:
                 progress_bar.empty()
                 status_text.empty()
                 
-                # Show success message
+                # Show success message based on data source
                 if is_demo_data:
-                    st.info(f"ğŸ“Š Loaded {len(combined_data_with_changes)} days of {selected_crypto} **demo data** with {analysis_results.full_moon_count} full moon periods! (Real API unavailable)")
+                    st.info(f"ğŸ“Š Loaded {len(combined_data_with_changes)} days of {selected_crypto} **demo data** with {analysis_results.full_moon_count} full moon periods! (APIs unavailable - using simulated data)")
+                elif is_fallback_data:
+                    st.warning(f"âš ï¸ Loaded {len(combined_data_with_changes)} days of {selected_crypto} data from **backup source** with {analysis_results.full_moon_count} full moon periods! (Primary API unavailable)")
                 else:
                     st.success(f"ğŸ‰ Successfully loaded {len(combined_data_with_changes)} days of {selected_crypto} data with {analysis_results.full_moon_count} full moon periods!")
                 
@@ -1456,14 +1535,14 @@ class CryptoMoonDashboard:
                 )
             elif "connection" in error_str.lower():
                 error_msg = (
-                    "ğŸ **Connection Error**\n\n"
+                    "ï¿½ **Connection Error**\n\n"
                     "Unable to connect to the cryptocurrency data API. Please:\n"
                     "- Check your internet connection\n"
                     "- Try again in a few moments\n"
                     "- Ensure you're not behind a restrictive firewall"
                 )
             else:
-                error_msg = f"â **Data Fetch Error**\n\nFailed to refresh data: {str(e)}\n\nPlease try again in a few moments."
+                error_msg = f"ï¿½ **Data Fetch Error**\n\nFailed to refresh data: {str(e)}\n\nPlease try again in a few moments."
             
             st.session_state.error_message = error_msg
             logger.error(f"Data refresh failed: {e}")
@@ -1635,7 +1714,7 @@ class CryptoMoonDashboard:
             st.info("No full moon data with price changes available.")
             return
         
-        st.markdown("## ğŸ• Full Moon Analysis Table")
+        st.markdown("## ï¿½ Full Moon Analysis Table")
         
         # Create table data with enhanced formatting
         table_data = []
@@ -1654,7 +1733,7 @@ class CryptoMoonDashboard:
             
             table_data.append({
                 "ğŸ—“ï¸ Date": date_str,
-                "ğŸ• Moon Phase": f"{point.moon_data.phase_percentage:.1f}%",
+                "ï¿½ Moon Phase": f"{point.moon_data.phase_percentage:.1f}%",
                 f"ğŸ’° {st.session_state.selected_crypto} Price": f"${point.crypto_data.close_price:,.2f}",
                 "ğŸ“Š Price Change": change_str,
                 "ğŸ“ˆ Volume": f"{point.crypto_data.volume:,.0f}"
@@ -1696,7 +1775,7 @@ class CryptoMoonDashboard:
             # Calculate win rate
             win_rate = (positive_days / len(full_moon_data)) * 100
             
-            st.markdown("### ğŸ• Full Moon Performance Summary")
+            st.markdown("### ï¿½ Full Moon Performance Summary")
             
             col1, col2, col3, col4 = st.columns(4)
             with col1:
